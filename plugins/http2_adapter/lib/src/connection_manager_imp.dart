@@ -145,7 +145,7 @@ class _ConnectionManager implements ConnectionManager {
     final timeout = (options.connectTimeout ?? Duration.zero) > Duration.zero
         ? options.connectTimeout!
         : null;
-    final proxy = clientConfig.proxy;
+    final proxy = await clientConfig.findProxy?.call(target);
 
     if (proxy == null) {
       if (target.scheme != 'https') {
