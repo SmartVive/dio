@@ -59,7 +59,12 @@ class Http2Adapter implements HttpClientAdapter {
   ) async {
     late final ClientTransportConnection transport;
     try {
-      transport = await connectionManager.getConnection(options);
+      if (options.uri.isScheme('http')){
+        //https://github.com/dart-lang/http/issues/1383
+        throw DioH2NotSupportedException(options.uri, null);
+      } else {
+        transport = await connectionManager.getConnection(options);
+      }
     } on DioH2NotSupportedException catch (e) {
       // Fallback to use the callback
       // or to another adapter (typically IOHttpClientAdapter)
