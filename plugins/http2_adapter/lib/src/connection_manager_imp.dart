@@ -47,7 +47,18 @@ class _ConnectionManager implements ConnectionManager {
     }
     // Identify whether the connection can be reused.
     // [Uri.scheme] is required when redirecting from non-TLS to TLS connection.
-    final transportCacheKey = '${uri.scheme}://${uri.host}:${uri.port}';
+    final String transportCacheKey;
+    final clientConfig = ClientSetting();
+    if (onClientCreate != null) {
+      onClientCreate!(uri, clientConfig);
+    }
+    final proxy = await clientConfig.findProxy?.call(uri);
+    if (proxy == null) {
+      transportCacheKey = '${uri.scheme}://${uri.host}:${uri.port}';
+    } else {
+      transportCacheKey = '${proxy.host}:${proxy.port}_${uri.scheme}://${uri.host}:${uri.port}';
+    }
+
     _ClientTransportConnectionState? transportState =
         _transportsMap[transportCacheKey];
     if (transportState == null) {
@@ -55,7 +66,7 @@ class _ConnectionManager implements ConnectionManager {
           _connectFutures[transportCacheKey];
       if (initFuture == null) {
         _connectFutures[transportCacheKey] =
-            initFuture = _connect(options, redirects);
+            initFuture = _connect(options, redirects, proxy);
       }
       try {
         transportState = await initFuture;
@@ -74,7 +85,7 @@ class _ConnectionManager implements ConnectionManager {
       if (!transportState.transport.isOpen) {
         transportState.dispose();
         _transportsMap[transportCacheKey] =
-            transportState = await _connect(options, redirects);
+            transportState = await _connect(options, redirects, proxy);
       }
     }
     return transportState.activeTransport;
@@ -83,12 +94,18 @@ class _ConnectionManager implements ConnectionManager {
   Future<_ClientTransportConnectionState> _connect(
     RequestOptions options,
     List<RedirectRecord> redirects,
+    Uri? proxy,
   ) async {
     Uri uri = options.uri;
     if (redirects.isNotEmpty) {
       uri = Http2Adapter.resolveRedirectUri(uri, redirects.last.location);
     }
-    final domain = '${uri.host}:${uri.port}';
+    final String transportCacheKey;
+    if (proxy == null) {
+      transportCacheKey = '${uri.scheme}://${uri.host}:${uri.port}';
+    } else {
+      transportCacheKey = '${proxy.host}:${proxy.port}_${uri.scheme}://${uri.host}:${uri.port}';
+    }
     final clientConfig = ClientSetting();
     if (onClientCreate != null) {
       onClientCreate!(uri, clientConfig);
@@ -98,7 +115,7 @@ class _ConnectionManager implements ConnectionManager {
     // or [SecureSocket] for TLS connections.
     late final Socket socket;
     try {
-      socket = await _createSocket(uri, options, clientConfig);
+      socket = await _createSocket(uri, options, clientConfig, proxy);
     } on SocketException catch (e) {
       if (e.osError == null) {
         if (e.message.contains('timed out')) {
@@ -143,7 +160,7 @@ class _ConnectionManager implements ConnectionManager {
     transportState.delayClose(
       _closed ? const Duration(milliseconds: 50) : _idleTimeout,
       () {
-        _transportsMap.remove(domain);
+        _transportsMap.remove(transportCacheKey);
         transportState.transport.finish();
       },
     );
@@ -154,11 +171,11 @@ class _ConnectionManager implements ConnectionManager {
     Uri target,
     RequestOptions options,
     ClientSetting clientConfig,
+    Uri? proxy,
   ) async {
     final timeout = (options.connectTimeout ?? Duration.zero) > Duration.zero
         ? options.connectTimeout!
         : null;
-    final proxy = await clientConfig.findProxy?.call(target);
 
     if (proxy == null) {
       if (target.scheme != 'https') {
