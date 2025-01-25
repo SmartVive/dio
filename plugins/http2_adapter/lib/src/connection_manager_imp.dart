@@ -41,13 +41,24 @@ class _ConnectionManager implements ConnectionManager {
       );
     }
     final uri = options.uri;
-    final domain = '${uri.host}:${uri.port}';
+    final String domain;
+
+    final clientConfig = ClientSetting();
+    if (onClientCreate != null) {
+      onClientCreate!(uri, clientConfig);
+    }
+    final proxy = await clientConfig.findProxy?.call(uri);
+    if (proxy == null) {
+      domain = '${uri.host}:${uri.port}';
+    } else {
+      domain = '${proxy.host}:${proxy.port}_${uri.host}:${uri.port}';
+    }
     _ClientTransportConnectionState? transportState = _transportsMap[domain];
     if (transportState == null) {
       Future<_ClientTransportConnectionState>? initFuture =
           _connectFutures[domain];
       if (initFuture == null) {
-        _connectFutures[domain] = initFuture = _connect(options);
+        _connectFutures[domain] = initFuture = _connect(options, proxy);
       }
       try {
         transportState = await initFuture;
@@ -65,7 +76,7 @@ class _ConnectionManager implements ConnectionManager {
       // Check whether the connection is terminated, if it is, reconnecting.
       if (!transportState.transport.isOpen) {
         transportState.dispose();
-        _transportsMap[domain] = transportState = await _connect(options);
+        _transportsMap[domain] = transportState = await _connect(options, proxy);
       }
     }
     return transportState.activeTransport;
@@ -73,6 +84,7 @@ class _ConnectionManager implements ConnectionManager {
 
   Future<_ClientTransportConnectionState> _connect(
     RequestOptions options,
+    Uri? proxy,
   ) async {
     final uri = options.uri;
     final domain = '${uri.host}:${uri.port}';
@@ -85,7 +97,7 @@ class _ConnectionManager implements ConnectionManager {
     // or [SecureSocket] for TLS connections.
     late final Socket socket;
     try {
-      socket = await _createSocket(uri, options, clientConfig);
+      socket = await _createSocket(uri, options, clientConfig, proxy);
     } on SocketException catch (e) {
       if (e.osError == null) {
         if (e.message.contains('timed out')) {
@@ -141,11 +153,11 @@ class _ConnectionManager implements ConnectionManager {
     Uri target,
     RequestOptions options,
     ClientSetting clientConfig,
+    Uri? proxy,
   ) async {
     final timeout = (options.connectTimeout ?? Duration.zero) > Duration.zero
         ? options.connectTimeout!
         : null;
-    final proxy = await clientConfig.findProxy?.call(target);
 
     if (proxy == null) {
       if (target.scheme != 'https') {
