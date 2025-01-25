@@ -36,10 +36,11 @@ class _ConnectionManager implements ConnectionManager {
   final List<String> _supportedProtocols;
 
   /// Saving the reusable connections
-  final _transportsMap = <String, _ClientTransportConnectionState>{};
+  final _transportsMap = <_ConnectionKey, _ClientTransportConnectionState>{};
 
   /// Saving the connecting futures
-  final _connectFutures = <String, Future<_ClientTransportConnectionState>>{};
+  final _connectFutures =
+      <_ConnectionKey, Future<_ClientTransportConnectionState>>{};
 
   bool _closed = false;
   bool _forceClosed = false;
@@ -48,12 +49,16 @@ class _ConnectionManager implements ConnectionManager {
   @visibleForTesting
   int get cachedConnectionsCount => _transportsMap.length;
 
-  /// Generates a consistent cache key for the given [uri].
-  ///
-  /// The key format is `scheme://host:port` (e.g., `https://example.com:443`).
-  /// This ensures consistency between storing and removing connections
-  /// from [_transportsMap].
-  String _getCacheKey(Uri uri) => '${uri.scheme}://${uri.host}:${uri.port}';
+  /// Generates a consistent cache key for the given [uri] and [proxy].
+  _ConnectionKey _getCacheKey(Uri uri, Uri? proxy) => (
+        targetScheme: uri.scheme,
+        targetHost: uri.host,
+        targetPort: uri.port,
+        proxyScheme: proxy?.scheme,
+        proxyUserInfo: proxy?.userInfo,
+        proxyHost: proxy?.host,
+        proxyPort: proxy?.port,
+      );
 
   @override
   Future<ClientTransportConnection> getConnection(
@@ -69,17 +74,25 @@ class _ConnectionManager implements ConnectionManager {
     if (redirects.isNotEmpty) {
       uri = Http2Adapter.resolveRedirectUri(uri, redirects.last.location);
     }
-    // Identify whether the connection can be reused.
-    // [Uri.scheme] is required when redirecting from non-TLS to TLS connection.
-    final transportCacheKey = _getCacheKey(uri);
+    final clientConfig = ClientSetting();
+    onClientCreate?.call(uri, clientConfig);
+    final proxy = await clientConfig._resolveProxy(uri);
+    // Connections can only be reused when both their destination and proxy
+    // tunnel match the current request.
+    final transportCacheKey = _getCacheKey(uri, proxy);
     _ClientTransportConnectionState? transportState =
         _transportsMap[transportCacheKey];
     if (transportState == null) {
       Future<_ClientTransportConnectionState>? initFuture =
           _connectFutures[transportCacheKey];
       if (initFuture == null) {
-        _connectFutures[transportCacheKey] =
-            initFuture = _connect(options, redirects);
+        _connectFutures[transportCacheKey] = initFuture = _connect(
+          uri,
+          options,
+          transportCacheKey,
+          clientConfig,
+          proxy,
+        );
       }
       try {
         transportState = await initFuture;
@@ -97,32 +110,30 @@ class _ConnectionManager implements ConnectionManager {
       // Check whether the connection is terminated, if it is, reconnecting.
       if (!transportState.transport.isOpen) {
         transportState.dispose();
-        _transportsMap[transportCacheKey] =
-            transportState = await _connect(options, redirects);
+        _transportsMap[transportCacheKey] = transportState = await _connect(
+          uri,
+          options,
+          transportCacheKey,
+          clientConfig,
+          proxy,
+        );
       }
     }
     return transportState.activeTransport;
   }
 
   Future<_ClientTransportConnectionState> _connect(
+    Uri uri,
     RequestOptions options,
-    List<RedirectRecord> redirects,
+    _ConnectionKey transportCacheKey,
+    ClientSetting clientConfig,
+    Uri? proxy,
   ) async {
-    Uri uri = options.uri;
-    if (redirects.isNotEmpty) {
-      uri = Http2Adapter.resolveRedirectUri(uri, redirects.last.location);
-    }
-    final domain = _getCacheKey(uri);
-    final clientConfig = ClientSetting();
-    if (onClientCreate != null) {
-      onClientCreate!(uri, clientConfig);
-    }
-
     // Allow [Socket] for non-TLS connections
     // or [SecureSocket] for TLS connections.
     late final Socket socket;
     try {
-      socket = await _createSocket(uri, options, clientConfig);
+      socket = await _createSocket(uri, options, clientConfig, proxy);
     } on SocketException catch (e) {
       if (e.osError == null) {
         if (e.message.contains('timed out')) {
@@ -167,7 +178,7 @@ class _ConnectionManager implements ConnectionManager {
     transportState.delayClose(
       _closed ? const Duration(milliseconds: 50) : _idleTimeout,
       () {
-        _transportsMap.remove(domain);
+        _transportsMap.remove(transportCacheKey);
         transportState.transport.finish();
       },
     );
@@ -178,11 +189,11 @@ class _ConnectionManager implements ConnectionManager {
     Uri target,
     RequestOptions options,
     ClientSetting clientConfig,
+    Uri? proxy,
   ) async {
     final timeout = (options.connectTimeout ?? Duration.zero) > Duration.zero
         ? options.connectTimeout!
         : null;
-    final proxy = await clientConfig.findProxy?.call(target);
 
     if (proxy == null) {
       if (target.scheme != 'https') {
@@ -322,6 +333,16 @@ class _ConnectionManager implements ConnectionManager {
     }
   }
 }
+
+typedef _ConnectionKey = ({
+  String targetScheme,
+  String targetHost,
+  int targetPort,
+  String? proxyScheme,
+  String? proxyUserInfo,
+  String? proxyHost,
+  int? proxyPort,
+});
 
 class _ClientTransportConnectionState {
   _ClientTransportConnectionState(this.transport);

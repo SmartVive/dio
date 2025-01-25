@@ -6,6 +6,11 @@ typedef ValidateCertificate = bool Function(
   int port,
 );
 
+/// Resolves the proxy to use for a request to [uri].
+///
+/// Returning `null` connects directly to [uri].
+typedef ProxyResolver = FutureOr<Uri?> Function(Uri uri);
+
 class ClientSetting {
   /// The certificate provided by the server is checked
   /// using the trusted certificates set in the SecurityContext object.
@@ -28,8 +33,20 @@ class ClientSetting {
   /// [validateCertificate] evaluates the leaf certificate.
   ValidateCertificate? validateCertificate;
 
-  /// Create clients with the given [findProxy] setting.
-  /// When it's set, all HTTP/2 traffic from [Dio] will go through the proxy tunnel.
-  /// This setting uses [Uri] to correctly pass the scheme, address, and port of the proxy.
-  Future<Uri?>? Function(Uri uri)? findProxy;
+  /// Creates clients with the given [proxy] setting.
+  ///
+  /// When set, all HTTP/2 traffic from [Dio] goes through this proxy tunnel.
+  /// The [Uri] contains the scheme, address, port, and optional credentials.
+  Uri? proxy;
+
+  /// Resolves a proxy for each request URI.
+  ///
+  /// When set, this takes precedence over [proxy]. Returning `null` connects
+  /// directly. The resolver can complete synchronously or asynchronously.
+  ProxyResolver? findProxy;
+
+  Future<Uri?> _resolveProxy(Uri uri) async {
+    final resolver = findProxy;
+    return resolver == null ? proxy : await resolver(uri);
+  }
 }
