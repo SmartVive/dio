@@ -12,6 +12,10 @@ See the [Migration Guide][] for the complete breaking changes list.**
 - Make the `badCertificateCallback` pinning test deterministic by pinning a
   fingerprint that cannot match the served certificate, instead of relying on
   badssl.com hosts serving different certificates.
+- Fix `NoSuchMethodError` when using a class that `implements Interceptor`
+  instead of `extends Interceptor`. The interceptor pipeline was calling private
+  dispatch methods that only exist on `Interceptor` subclasses, breaking any
+  class using interface implementation.
 
 ## 5.11.0
 
